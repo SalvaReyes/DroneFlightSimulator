@@ -104,3 +104,14 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# macOS
+.DS_Store
+
+# VS Code (ignora todo y comparte solo recomendaciones de extensiones)
+.vscode/*
+!.vscode/extensions.json
+
+# Unity Test/Coverage (si usas paquetes de test/coverage)
+CodeCoverage/
+TestResults/
