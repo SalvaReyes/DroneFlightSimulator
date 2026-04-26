@@ -62,9 +62,18 @@ public class QuadcopterController : MonoBehaviour
     [SerializeField] private bool drawDebugGizmos = true;
 
     private readonly float[] _rotorThrusts = new float[4];
+    private readonly Vector3[] _rotorPointsBody = new Vector3[4];
+    private readonly Transform[] _rotorVisuals = new Transform[4];
+    private readonly Vector3[] _rotorVisualSpinAxes = new Vector3[4];
+    private readonly float[] _rotorSpinDirections = new float[4];
+    private readonly float[] _rotorMaxVisualSpinSpeeds = new float[4];
+    private readonly float[] _rotorYawFactors = new float[4];
     private readonly float[,] _mixMatrix = new float[4, 4];
+    private readonly float[,] _mixMatrixInverse = new float[4, 4];
     private readonly float[] _mixVector = new float[4];
-    private readonly float[] _mixSolution = new float[4];
+    private readonly float[,] _inverseScratch = new float[4, 8];
+    private bool _rotorGeometryReady;
+    private bool _mixingReady;
 
     private Vector3 _positionWorld;
     private Quaternion _rotationWorld;
@@ -89,12 +98,14 @@ public class QuadcopterController : MonoBehaviour
             TryAutoCenterOfMass();
         }
 
+        RefreshRotorGeometry();
         SyncStateFromTransform();
         ResetControllers();
     }
 
     private void OnEnable()
     {
+        RefreshRotorGeometry();
         SyncStateFromTransform();
         ResetControllers();
     }
@@ -128,6 +139,8 @@ public class QuadcopterController : MonoBehaviour
         maxPitchTorque = Mathf.Max(0f, maxPitchTorque);
         maxYawTorque = Mathf.Max(0f, maxYawTorque);
         maxRollTorque = Mathf.Max(0f, maxRollTorque);
+
+        RefreshRotorGeometry();
     }
 
     private void Update()
@@ -138,7 +151,12 @@ public class QuadcopterController : MonoBehaviour
 
     private void FixedUpdate()
     {
-        if (!AreRotorsConfigured())
+        if (!_rotorGeometryReady)
+        {
+            RefreshRotorGeometry();
+        }
+
+        if (!_rotorGeometryReady)
         {
             return;
         }
@@ -240,29 +258,16 @@ public class QuadcopterController : MonoBehaviour
 
     private void MixBouabdallahInputs(float collectiveThrust, Vector3 torqueBody)
     {
-        // U1 is total thrust. The other rows are the body torques produced by r x F
-        // and rotor drag in Unity axes: x = pitch, y = yaw, z = roll.
-        for (int i = 0; i < 4; i++)
-        {
-            Vector3 rotorPointBody = transform.InverseTransformPoint(rotors[i].transform.position) - centerOfMassLocal;
-
-            _mixMatrix[0, i] = 1f;
-            _mixMatrix[1, i] = -rotorPointBody.z;
-            _mixMatrix[2, i] = rotors[i].yawSpinDirection * yawDragTorqueCoefficient;
-            _mixMatrix[3, i] = rotorPointBody.x;
-        }
-
         _mixVector[0] = collectiveThrust;
         _mixVector[1] = torqueBody.x;
         _mixVector[2] = torqueBody.y;
         _mixVector[3] = torqueBody.z;
 
-        bool solved = SolveLinearSystem4x4(_mixMatrix, _mixVector, _mixSolution);
         float evenThrust = collectiveThrust * 0.25f;
 
         for (int i = 0; i < 4; i++)
         {
-            float thrust = solved ? _mixSolution[i] : evenThrust;
+            float thrust = _mixingReady ? MultiplyMixingRow(i) : evenThrust;
             _rotorThrusts[i] = Mathf.Clamp(thrust, minRotorThrust, maxRotorThrust);
         }
     }
@@ -277,12 +282,12 @@ public class QuadcopterController : MonoBehaviour
         {
             float thrust = _rotorThrusts[i];
             Vector3 forceBody = Vector3.up * thrust;
-            Vector3 rotorPointBody = transform.InverseTransformPoint(rotors[i].transform.position) - centerOfMassLocal;
+            Vector3 rotorPointBody = _rotorPointsBody[i];
 
             totalForceBody += forceBody;
             totalTorqueBody += Vector3.Cross(rotorPointBody, forceBody);
-            totalTorqueBody += Vector3.up * (rotors[i].yawSpinDirection * yawDragTorqueCoefficient * thrust);
-            residualRotorSpeed += rotors[i].yawSpinDirection * Mathf.Sqrt(Mathf.Max(0f, thrust));
+            totalTorqueBody += Vector3.up * (_rotorYawFactors[i] * thrust);
+            residualRotorSpeed += _rotorSpinDirections[i] * Mathf.Sqrt(Mathf.Max(0f, thrust));
         }
 
         Vector3 gravityWorld = Vector3.down * (mass * gravityAcceleration);
@@ -344,29 +349,36 @@ public class QuadcopterController : MonoBehaviour
         return Quaternion.Inverse(current) * axisWorld.normalized * (angleDeg * Mathf.Deg2Rad);
     }
 
-    private static bool SolveLinearSystem4x4(float[,] matrix, float[] values, float[] solution)
+    private float MultiplyMixingRow(int row)
+    {
+        return
+            _mixMatrixInverse[row, 0] * _mixVector[0] +
+            _mixMatrixInverse[row, 1] * _mixVector[1] +
+            _mixMatrixInverse[row, 2] * _mixVector[2] +
+            _mixMatrixInverse[row, 3] * _mixVector[3];
+    }
+
+    private bool TryBuildMixingInverse()
     {
         const int n = 4;
-        float[,] a = new float[n, n + 1];
 
         for (int r = 0; r < n; r++)
         {
             for (int c = 0; c < n; c++)
             {
-                a[r, c] = matrix[r, c];
+                _inverseScratch[r, c] = _mixMatrix[r, c];
+                _inverseScratch[r, c + n] = r == c ? 1f : 0f;
             }
-
-            a[r, n] = values[r];
         }
 
         for (int pivotCol = 0; pivotCol < n; pivotCol++)
         {
             int pivotRow = pivotCol;
-            float pivotAbs = Mathf.Abs(a[pivotRow, pivotCol]);
+            float pivotAbs = Mathf.Abs(_inverseScratch[pivotRow, pivotCol]);
 
             for (int r = pivotCol + 1; r < n; r++)
             {
-                float candidate = Mathf.Abs(a[r, pivotCol]);
+                float candidate = Mathf.Abs(_inverseScratch[r, pivotCol]);
                 if (candidate > pivotAbs)
                 {
                     pivotAbs = candidate;
@@ -381,13 +393,13 @@ public class QuadcopterController : MonoBehaviour
 
             if (pivotRow != pivotCol)
             {
-                SwapRows(a, pivotRow, pivotCol, n + 1);
+                SwapRows(_inverseScratch, pivotRow, pivotCol, n * 2);
             }
 
-            float pivot = a[pivotCol, pivotCol];
-            for (int c = pivotCol; c <= n; c++)
+            float pivot = _inverseScratch[pivotCol, pivotCol];
+            for (int c = 0; c < n * 2; c++)
             {
-                a[pivotCol, c] /= pivot;
+                _inverseScratch[pivotCol, c] /= pivot;
             }
 
             for (int r = 0; r < n; r++)
@@ -397,25 +409,60 @@ public class QuadcopterController : MonoBehaviour
                     continue;
                 }
 
-                float factor = a[r, pivotCol];
+                float factor = _inverseScratch[r, pivotCol];
                 if (Mathf.Abs(factor) < 0.000001f)
                 {
                     continue;
                 }
 
-                for (int c = pivotCol; c <= n; c++)
+                for (int c = 0; c < n * 2; c++)
                 {
-                    a[r, c] -= factor * a[pivotCol, c];
+                    _inverseScratch[r, c] -= factor * _inverseScratch[pivotCol, c];
                 }
             }
         }
 
         for (int r = 0; r < n; r++)
         {
-            solution[r] = a[r, n];
+            for (int c = 0; c < n; c++)
+            {
+                _mixMatrixInverse[r, c] = _inverseScratch[r, c + n];
+            }
         }
 
         return true;
+    }
+
+    private void RefreshRotorGeometry()
+    {
+        _rotorGeometryReady = false;
+        _mixingReady = false;
+
+        if (!AreRotorsConfigured())
+        {
+            return;
+        }
+
+        // U1 is total thrust. The other rows are the body torques produced by r x F
+        // and rotor drag in Unity axes: x = pitch, y = yaw, z = roll.
+        for (int i = 0; i < 4; i++)
+        {
+            Rotor rotor = rotors[i];
+            _rotorPointsBody[i] = transform.InverseTransformPoint(rotor.transform.position) - centerOfMassLocal;
+            _rotorSpinDirections[i] = rotor.yawSpinDirection;
+            _rotorMaxVisualSpinSpeeds[i] = rotor.maxVisualSpinSpeed;
+            _rotorVisuals[i] = rotor.visual != null ? rotor.visual : rotor.transform;
+            _rotorVisualSpinAxes[i] = rotor.visualSpinAxis.sqrMagnitude > 0.0001f ? rotor.visualSpinAxis.normalized : Vector3.up;
+            _rotorYawFactors[i] = _rotorSpinDirections[i] * yawDragTorqueCoefficient;
+
+            _mixMatrix[0, i] = 1f;
+            _mixMatrix[1, i] = -_rotorPointsBody[i].z;
+            _mixMatrix[2, i] = _rotorYawFactors[i];
+            _mixMatrix[3, i] = _rotorPointsBody[i].x;
+        }
+
+        _rotorGeometryReady = true;
+        _mixingReady = TryBuildMixingInverse();
     }
 
     private static void SwapRows(float[,] matrix, int rowA, int rowB, int columnCount)
@@ -430,23 +477,16 @@ public class QuadcopterController : MonoBehaviour
 
     private void AnimateRotors()
     {
-        for (int i = 0; i < rotors.Length; i++)
+        if (!_rotorGeometryReady)
         {
-            Rotor rotor = rotors[i];
-            if (rotor == null)
-            {
-                continue;
-            }
+            return;
+        }
 
-            Transform visual = rotor.visual != null ? rotor.visual : rotor.transform;
-            if (visual == null)
-            {
-                continue;
-            }
-
+        for (int i = 0; i < 4; i++)
+        {
             float normalizedThrust = Mathf.InverseLerp(minRotorThrust, maxRotorThrust, _rotorThrusts[i]);
-            float spinSpeed = normalizedThrust * rotor.maxVisualSpinSpeed;
-            visual.Rotate(rotor.visualSpinAxis.normalized, spinSpeed * rotor.yawSpinDirection * Time.deltaTime, Space.Self);
+            float spinSpeed = normalizedThrust * _rotorMaxVisualSpinSpeeds[i] * _rotorSpinDirections[i];
+            _rotorVisuals[i].Rotate(_rotorVisualSpinAxes[i], spinSpeed * Time.deltaTime, Space.Self);
         }
     }
 

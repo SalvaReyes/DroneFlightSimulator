@@ -597,7 +597,8 @@ public static class DroneSimulatorQuickSetup
         }
 
         follow.SetTarget(target);
-        mainCamera.transform.position = target.position + new Vector3(0f, 4f, -9f);
+        follow.Configure(5.5f, 2.4f);
+        mainCamera.transform.position = target.position + new Vector3(0f, 2.4f, -5.5f);
         mainCamera.transform.LookAt(target);
         EditorUtility.SetDirty(mainCamera);
     }
