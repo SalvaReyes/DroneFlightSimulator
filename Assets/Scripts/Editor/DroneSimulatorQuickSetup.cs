@@ -42,7 +42,7 @@ public static class DroneSimulatorQuickSetup
         public Material EndPad;
         public Material DroneBody;
         public Material Rotor;
-        public Material Target;
+        public Material Accent;
     }
 
     [MenuItem("Tools/Drone Simulator/Create Demo Drone Rig")]
@@ -57,10 +57,6 @@ public static class DroneSimulatorQuickSetup
             ? waypoints[0].position + Vector3.up * 1.4f
             : new Vector3(0f, 2f, 0f);
 
-        Vector3 initialTargetPoint = waypoints.Length > 1
-            ? waypoints[1].position
-            : spawnPoint + new Vector3(6f, 0f, 0f);
-
         GameObject root = new GameObject("Drone");
         Undo.RegisterCreatedObjectUndo(root, "Create Demo Drone Rig");
         root.transform.position = spawnPoint;
@@ -69,9 +65,8 @@ public static class DroneSimulatorQuickSetup
 
         CreateBody(root.transform, materials);
         Transform[] rotorTransforms = CreateRotors(root.transform, materials);
-        Transform targetMarker = CreateTargetMarker(initialTargetPoint, materials.Target);
 
-        ConfigureController(controller, rotorTransforms, targetMarker);
+        ConfigureController(controller, rotorTransforms);
         SetupMainCamera(root.transform);
 
         Selection.activeGameObject = root;
@@ -97,7 +92,6 @@ public static class DroneSimulatorQuickSetup
     private static void RemoveExistingDemoObjects()
     {
         DestroyIfExists("Drone");
-        DestroyIfExists("AutoTarget");
         DestroyIfExists("DroneTestingCourse");
         DestroyIfExists("Ground");
     }
@@ -149,7 +143,7 @@ public static class DroneSimulatorQuickSetup
             EndPad = GetOrCreateMaterial($"{GeneratedFolder}/M_EndPad.mat", new Color(0.90f, 0.20f, 0.20f), null, Vector2.one, true),
             DroneBody = GetOrCreateMaterial($"{GeneratedFolder}/M_DroneBody.mat", new Color(0.80f, 0.85f, 0.90f)),
             Rotor = GetOrCreateMaterial($"{GeneratedFolder}/M_Rotor.mat", new Color(0.10f, 0.12f, 0.14f)),
-            Target = GetOrCreateMaterial($"{GeneratedFolder}/M_Target.mat", new Color(0.95f, 0.90f, 0.15f), null, Vector2.one, true)
+            Accent = GetOrCreateMaterial($"{GeneratedFolder}/M_Accent.mat", new Color(0.95f, 0.90f, 0.15f), null, Vector2.one, true)
         };
 
         AssetDatabase.SaveAssets();
@@ -527,7 +521,7 @@ public static class DroneSimulatorQuickSetup
                 Vector3.zero,
                 Quaternion.identity,
                 new Vector3(0.018f, 0.0025f, 0.18f),
-                materials.Target,
+                materials.Accent,
                 true);
 
             rotorTransforms[i] = rotor.transform;
@@ -536,28 +530,9 @@ public static class DroneSimulatorQuickSetup
         return rotorTransforms;
     }
 
-    private static Transform CreateTargetMarker(Vector3 worldPosition, Material material)
-    {
-        GameObject marker = CreatePrimitive(
-            "AutoTarget",
-            PrimitiveType.Sphere,
-            null,
-            worldPosition,
-            Quaternion.identity,
-            Vector3.one * 0.35f,
-            material,
-            true);
-
-        marker.transform.position = worldPosition;
-        return marker.transform;
-    }
-
-    private static void ConfigureController(QuadcopterController controller, Transform[] rotors, Transform targetMarker)
+    private static void ConfigureController(QuadcopterController controller, Transform[] rotors)
     {
         SerializedObject serializedController = new SerializedObject(controller);
-
-        SerializedProperty flightModeProperty = serializedController.FindProperty("flightMode");
-        flightModeProperty.enumValueIndex = 0;
 
         SerializedProperty rotorsProperty = serializedController.FindProperty("rotors");
         rotorsProperty.arraySize = 4;
@@ -578,38 +553,27 @@ public static class DroneSimulatorQuickSetup
         serializedController.FindProperty("gravityAcceleration").floatValue = 9.81f;
         serializedController.FindProperty("linearDrag").floatValue = 0.12f;
         serializedController.FindProperty("angularDrag").floatValue = 0.18f;
+        serializedController.FindProperty("rotorGyroscopicCoefficient").floatValue = 0.0006f;
         serializedController.FindProperty("maxLinearSpeed").floatValue = 20f;
         serializedController.FindProperty("maxAngularSpeed").floatValue = 20f;
 
         serializedController.FindProperty("minRotorThrust").floatValue = 0f;
         serializedController.FindProperty("maxRotorThrust").floatValue = 24f;
         serializedController.FindProperty("manualMaxClimbRate").floatValue = 2.8f;
-        serializedController.FindProperty("manualMaxTiltAngle").floatValue = 15f;
-        serializedController.FindProperty("manualYawRate").floatValue = 55f;
-
-        serializedController.FindProperty("autoTargetTransform").objectReferenceValue = targetMarker;
-        serializedController.FindProperty("autoTargetPosition").vector3Value = targetMarker.position;
-        serializedController.FindProperty("allowMouseClickTarget").boolValue = true;
-        serializedController.FindProperty("faceTargetInAutoMode").boolValue = true;
-        serializedController.FindProperty("autoMaxTiltAngle").floatValue = 30f;
-        serializedController.FindProperty("autoMaxHorizontalAcceleration").floatValue = 6f;
-        serializedController.FindProperty("autoMaxVerticalSpeed").floatValue = 3f;
-        serializedController.FindProperty("autoAltitudePositionGain").floatValue = 1.2f;
-
-        serializedController.FindProperty("horizontalPositionKp").floatValue = 1.0f;
-        serializedController.FindProperty("horizontalPositionKi").floatValue = 0.04f;
-        serializedController.FindProperty("horizontalVelocityKd").floatValue = 1.8f;
+        serializedController.FindProperty("manualMaxTiltAngle").floatValue = 18f;
+        serializedController.FindProperty("manualYawRate").floatValue = 70f;
 
         serializedController.FindProperty("verticalSpeedKp").floatValue = 3.8f;
-        serializedController.FindProperty("verticalSpeedKi").floatValue = 1.0f;
-        serializedController.FindProperty("verticalSpeedKd").floatValue = 0.75f;
+        serializedController.FindProperty("verticalSpeedKi").floatValue = 0.65f;
+        serializedController.FindProperty("verticalSpeedKd").floatValue = 0.35f;
+        serializedController.FindProperty("verticalIntegralLimit").floatValue = 3f;
 
-        serializedController.FindProperty("attitudeKp").vector3Value = new Vector3(12f, 7f, 12f);
-        serializedController.FindProperty("attitudeKi").vector3Value = new Vector3(0.6f, 0.35f, 0.6f);
-        serializedController.FindProperty("attitudeKd").vector3Value = new Vector3(3.5f, 2.4f, 3.5f);
+        serializedController.FindProperty("attitudeAngleGain").floatValue = 6f;
+        serializedController.FindProperty("yawHeadingGain").floatValue = 4f;
+        serializedController.FindProperty("angularRateGain").vector3Value = new Vector3(7.5f, 5.5f, 7.5f);
         serializedController.FindProperty("maxPitchTorque").floatValue = 12f;
         serializedController.FindProperty("maxRollTorque").floatValue = 12f;
-        serializedController.FindProperty("maxYawTorque").floatValue = 7f;
+        serializedController.FindProperty("maxYawTorque").floatValue = 8f;
 
         serializedController.ApplyModifiedPropertiesWithoutUndo();
         EditorUtility.SetDirty(controller);

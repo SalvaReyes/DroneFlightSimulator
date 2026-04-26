@@ -2570,12 +2570,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8a974bb04e0d349828d922a4fd051b23, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::QuadcopterController
-  flightMode: 0
   mass: 1.4
   inertiaTensorBody: {x: 0.02, y: 0.04, z: 0.02}
   gravityAcceleration: 9.81
   linearDrag: 0.12
   angularDrag: 0.18
+  rotorGyroscopicCoefficient: 0.0006
   maxLinearSpeed: 20
   maxAngularSpeed: 20
   rotors:
@@ -2609,31 +2609,17 @@ MonoBehaviour:
   autoCenterOfMassFromRotors: 1
   centerOfMassLocal: {x: 0, y: 0, z: 0}
   manualMaxClimbRate: 2.8
-  manualMaxTiltAngle: 15
-  manualYawRate: 55
-  autoTargetTransform: {fileID: 2102983197}
-  autoTargetPosition: {x: 8, y: 2.4, z: 0}
-  faceTargetInAutoMode: 1
-  allowMouseClickTarget: 1
-  targetSelectionCamera: {fileID: 0}
-  autoMaxTiltAngle: 30
-  autoMaxHorizontalAcceleration: 6
-  autoMaxVerticalSpeed: 3
-  autoAltitudePositionGain: 1.2
-  horizontalPositionKp: 1
-  horizontalPositionKi: 0.04
-  horizontalVelocityKd: 1.8
-  horizontalIntegralLimit: 8
+  manualMaxTiltAngle: 18
+  manualYawRate: 70
   verticalSpeedKp: 3.8
-  verticalSpeedKi: 1
-  verticalSpeedKd: 0.75
-  verticalIntegralLimit: 4
-  attitudeKp: {x: 12, y: 7, z: 12}
-  attitudeKi: {x: 0.6, y: 0.35, z: 0.6}
-  attitudeKd: {x: 3.5, y: 2.4, z: 3.5}
-  attitudeIntegralLimit: {x: 0.45, y: 0.45, z: 0.45}
+  verticalSpeedKi: 0.65
+  verticalSpeedKd: 0.35
+  verticalIntegralLimit: 3
+  attitudeAngleGain: 6
+  yawHeadingGain: 4
+  angularRateGain: {x: 7.5, y: 5.5, z: 7.5}
   maxPitchTorque: 12
-  maxYawTorque: 7
+  maxYawTorque: 8
   maxRollTorque: 12
   drawDebugGizmos: 1
 --- !u!4 &533470941
@@ -7655,96 +7641,6 @@ MeshFilter:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 2093019530}
   m_Mesh: {fileID: 10209, guid: 0000000000000000e000000000000000, type: 0}
---- !u!1 &2102983194
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 2102983197}
-  - component: {fileID: 2102983196}
-  - component: {fileID: 2102983195}
-  m_Layer: 0
-  m_Name: AutoTarget
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!23 &2102983195
-MeshRenderer:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2102983194}
-  m_Enabled: 1
-  m_CastShadows: 1
-  m_ReceiveShadows: 1
-  m_DynamicOccludee: 1
-  m_StaticShadowCaster: 0
-  m_MotionVectors: 1
-  m_LightProbeUsage: 1
-  m_ReflectionProbeUsage: 1
-  m_RayTracingMode: 2
-  m_RayTraceProcedural: 0
-  m_RayTracingAccelStructBuildFlagsOverride: 0
-  m_RayTracingAccelStructBuildFlags: 1
-  m_SmallMeshCulling: 1
-  m_ForceMeshLod: -1
-  m_MeshLodSelectionBias: 0
-  m_RenderingLayerMask: 1
-  m_RendererPriority: 0
-  m_Materials:
-  - {fileID: 2100000, guid: f02ce6bddb98a49f9a48ff026ac6533d, type: 2}
-  m_StaticBatchInfo:
-    firstSubMesh: 0
-    subMeshCount: 0
-  m_StaticBatchRoot: {fileID: 0}
-  m_ProbeAnchor: {fileID: 0}
-  m_LightProbeVolumeOverride: {fileID: 0}
-  m_ScaleInLightmap: 1
-  m_ReceiveGI: 1
-  m_PreserveUVs: 1
-  m_IgnoreNormalsForChartDetection: 0
-  m_ImportantGI: 0
-  m_StitchLightmapSeams: 1
-  m_SelectedEditorRenderState: 3
-  m_MinimumChartSize: 4
-  m_AutoUVMaxDistance: 0.5
-  m_AutoUVMaxAngle: 89
-  m_LightmapParameters: {fileID: 0}
-  m_GlobalIlluminationMeshLod: 0
-  m_SortingLayerID: 0
-  m_SortingLayer: 0
-  m_SortingOrder: 0
-  m_MaskInteraction: 0
-  m_AdditionalVertexStreams: {fileID: 0}
---- !u!33 &2102983196
-MeshFilter:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2102983194}
-  m_Mesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
---- !u!4 &2102983197
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2102983194}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 8, y: 2.4, z: 0}
-  m_LocalScale: {x: 0.35, y: 0.35, z: 0.35}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &2128001167
 GameObject:
   m_ObjectHideFlags: 0
@@ -7789,4 +7685,3 @@ SceneRoots:
   - {fileID: 832575519}
   - {fileID: 880907604}
   - {fileID: 533470941}
-  - {fileID: 2102983197}
