@@ -6,6 +6,12 @@ using UnityEngine.InputSystem;
 
 public class QuadcopterController : MonoBehaviour
 {
+    public enum FlightMode
+    {
+        Manual,
+        AutoTarget
+    }
+
     [Serializable]
     public class Rotor
     {
@@ -21,13 +27,15 @@ public class QuadcopterController : MonoBehaviour
         public float maxVisualSpinSpeed = 3600f;
     }
 
-    [Header("Bouabdallah Dynamics")]
+    [Header("Mode")]
+    [SerializeField] private FlightMode flightMode = FlightMode.Manual;
+
+    [Header("Custom Dynamics (No Unity Rigidbody Physics)")]
     [SerializeField] private float mass = 1.4f;
     [SerializeField] private Vector3 inertiaTensorBody = new Vector3(0.02f, 0.04f, 0.02f);
     [SerializeField] private float gravityAcceleration = 9.81f;
     [SerializeField] private float linearDrag = 0.12f;
     [SerializeField] private float angularDrag = 0.18f;
-    [SerializeField] private float rotorGyroscopicCoefficient = 0.0006f;
     [SerializeField] private float maxLinearSpeed = 20f;
     [SerializeField] private float maxAngularSpeed = 20f;
 
@@ -44,16 +52,34 @@ public class QuadcopterController : MonoBehaviour
     [SerializeField] private float manualMaxTiltAngle = 20f;
     [SerializeField] private float manualYawRate = 70f;
 
-    [Header("Manual Vertical Stabilization")]
-    [SerializeField] private float verticalSpeedKp = 3.8f;
-    [SerializeField] private float verticalSpeedKi = 0.65f;
-    [SerializeField] private float verticalSpeedKd = 0.35f;
-    [SerializeField] private float verticalIntegralLimit = 3f;
+    [Header("Auto Target")]
+    [SerializeField] private Transform autoTargetTransform;
+    [SerializeField] private Vector3 autoTargetPosition = new Vector3(0f, 2f, 0f);
+    [SerializeField] private bool faceTargetInAutoMode = true;
+    [SerializeField] private bool allowMouseClickTarget = true;
+    [SerializeField] private Camera targetSelectionCamera;
+    [SerializeField] private float autoMaxTiltAngle = 30f;
+    [SerializeField] private float autoMaxHorizontalAcceleration = 6f;
+    [SerializeField] private float autoMaxVerticalSpeed = 3f;
+    [SerializeField] private float autoAltitudePositionGain = 1.2f;
 
-    [Header("Manual Attitude Stabilization")]
-    [SerializeField] private float attitudeAngleGain = 6f;
-    [SerializeField] private float yawHeadingGain = 4f;
-    [SerializeField] private Vector3 angularRateGain = new Vector3(7.5f, 5.5f, 7.5f);
+    [Header("Horizontal Position PID (Auto)")]
+    [SerializeField] private float horizontalPositionKp = 1.0f;
+    [SerializeField] private float horizontalPositionKi = 0.04f;
+    [SerializeField] private float horizontalVelocityKd = 1.8f;
+    [SerializeField] private float horizontalIntegralLimit = 8f;
+
+    [Header("Vertical Speed PID")]
+    [SerializeField] private float verticalSpeedKp = 3.8f;
+    [SerializeField] private float verticalSpeedKi = 1.0f;
+    [SerializeField] private float verticalSpeedKd = 0.75f;
+    [SerializeField] private float verticalIntegralLimit = 4f;
+
+    [Header("Attitude PID (Local Torques)")]
+    [SerializeField] private Vector3 attitudeKp = new Vector3(12f, 7f, 12f);
+    [SerializeField] private Vector3 attitudeKi = new Vector3(0.6f, 0.35f, 0.6f);
+    [SerializeField] private Vector3 attitudeKd = new Vector3(3.5f, 2.4f, 3.5f);
+    [SerializeField] private Vector3 attitudeIntegralLimit = new Vector3(0.45f, 0.45f, 0.45f);
     [SerializeField] private float maxPitchTorque = 12f;
     [SerializeField] private float maxYawTorque = 8f;
     [SerializeField] private float maxRollTorque = 12f;
@@ -62,18 +88,9 @@ public class QuadcopterController : MonoBehaviour
     [SerializeField] private bool drawDebugGizmos = true;
 
     private readonly float[] _rotorThrusts = new float[4];
-    private readonly Vector3[] _rotorPointsBody = new Vector3[4];
-    private readonly Transform[] _rotorVisuals = new Transform[4];
-    private readonly Vector3[] _rotorVisualSpinAxes = new Vector3[4];
-    private readonly float[] _rotorSpinDirections = new float[4];
-    private readonly float[] _rotorMaxVisualSpinSpeeds = new float[4];
-    private readonly float[] _rotorYawFactors = new float[4];
     private readonly float[,] _mixMatrix = new float[4, 4];
-    private readonly float[,] _mixMatrixInverse = new float[4, 4];
     private readonly float[] _mixVector = new float[4];
-    private readonly float[,] _inverseScratch = new float[4, 8];
-    private bool _rotorGeometryReady;
-    private bool _mixingReady;
+    private readonly float[] _mixSolution = new float[4];
 
     private Vector3 _positionWorld;
     private Quaternion _rotationWorld;
@@ -85,27 +102,33 @@ public class QuadcopterController : MonoBehaviour
     private float _manualPitchInput;
     private float _manualRollInput;
     private float _manualYawHeading;
+    private float _autoYawHeading;
 
+    private Vector3 _horizontalIntegral;
     private float _verticalSpeedIntegral;
     private float _lastVerticalSpeedError;
+    private Vector3 _attitudeIntegral;
 
     private void Awake()
     {
         DisableUnityRigidbodyIfPresent();
+
+        if (targetSelectionCamera == null)
+        {
+            targetSelectionCamera = Camera.main;
+        }
 
         if (autoCenterOfMassFromRotors)
         {
             TryAutoCenterOfMass();
         }
 
-        RefreshRotorGeometry();
         SyncStateFromTransform();
         ResetControllers();
     }
 
     private void OnEnable()
     {
-        RefreshRotorGeometry();
         SyncStateFromTransform();
         ResetControllers();
     }
@@ -119,123 +142,139 @@ public class QuadcopterController : MonoBehaviour
         inertiaTensorBody.x = Mathf.Max(0.0001f, inertiaTensorBody.x);
         inertiaTensorBody.y = Mathf.Max(0.0001f, inertiaTensorBody.y);
         inertiaTensorBody.z = Mathf.Max(0.0001f, inertiaTensorBody.z);
-        linearDrag = Mathf.Max(0f, linearDrag);
-        angularDrag = Mathf.Max(0f, angularDrag);
-        rotorGyroscopicCoefficient = Mathf.Max(0f, rotorGyroscopicCoefficient);
         maxLinearSpeed = Mathf.Max(0.1f, maxLinearSpeed);
         maxAngularSpeed = Mathf.Max(0.1f, maxAngularSpeed);
-        maxRotorThrust = Mathf.Max(0.01f, maxRotorThrust);
-        minRotorThrust = Mathf.Clamp(minRotorThrust, 0f, maxRotorThrust);
-        yawDragTorqueCoefficient = Mathf.Max(0f, yawDragTorqueCoefficient);
-        manualMaxClimbRate = Mathf.Max(0f, manualMaxClimbRate);
-        manualMaxTiltAngle = Mathf.Clamp(manualMaxTiltAngle, 0f, 75f);
-        manualYawRate = Mathf.Max(0f, manualYawRate);
         verticalIntegralLimit = Mathf.Max(0f, verticalIntegralLimit);
-        attitudeAngleGain = Mathf.Max(0f, attitudeAngleGain);
-        yawHeadingGain = Mathf.Max(0f, yawHeadingGain);
-        angularRateGain.x = Mathf.Max(0f, angularRateGain.x);
-        angularRateGain.y = Mathf.Max(0f, angularRateGain.y);
-        angularRateGain.z = Mathf.Max(0f, angularRateGain.z);
-        maxPitchTorque = Mathf.Max(0f, maxPitchTorque);
-        maxYawTorque = Mathf.Max(0f, maxYawTorque);
-        maxRollTorque = Mathf.Max(0f, maxRollTorque);
+        horizontalIntegralLimit = Mathf.Max(0f, horizontalIntegralLimit);
 
-        RefreshRotorGeometry();
+        attitudeIntegralLimit.x = Mathf.Max(0f, attitudeIntegralLimit.x);
+        attitudeIntegralLimit.y = Mathf.Max(0f, attitudeIntegralLimit.y);
+        attitudeIntegralLimit.z = Mathf.Max(0f, attitudeIntegralLimit.z);
     }
 
     private void Update()
     {
         ReadManualInputs();
+        HandleModeToggle();
+        HandleAutoTargetInput();
         AnimateRotors();
     }
 
     private void FixedUpdate()
     {
-        if (!_rotorGeometryReady)
-        {
-            RefreshRotorGeometry();
-        }
-
-        if (!_rotorGeometryReady)
+        if (!AreRotorsConfigured())
         {
             return;
         }
 
         float dt = Time.fixedDeltaTime;
-        Vector3 desiredTorqueBody = ComputeManualTorqueBody(dt);
-        float collectiveThrust = ComputeManualCollectiveThrust(dt);
 
-        MixBouabdallahInputs(collectiveThrust, desiredTorqueBody);
-        IntegrateBouabdallahDynamics(dt);
-    }
+        Vector3 desiredUp;
+        Vector3 desiredForward;
+        float collectiveThrust;
 
-    private Vector3 ComputeManualTorqueBody(float dt)
-    {
-        _manualYawHeading = WrapAngle360(_manualYawHeading + _manualYawInput * manualYawRate * dt);
-
-        Quaternion desiredRotation = BuildManualDesiredRotation();
-        Vector3 rotationErrorBody = RotationErrorBody(desiredRotation, _rotationWorld);
-
-        Vector3 desiredAngularVelocityBody = new Vector3(
-            rotationErrorBody.x * attitudeAngleGain,
-            rotationErrorBody.y * yawHeadingGain,
-            rotationErrorBody.z * attitudeAngleGain);
-
-        if (Mathf.Abs(_manualYawInput) > 0.001f)
+        if (flightMode == FlightMode.Manual)
         {
-            desiredAngularVelocityBody.y = _manualYawInput * manualYawRate * Mathf.Deg2Rad;
+            BuildManualSetpoint(out desiredUp, out desiredForward, out collectiveThrust, dt);
+        }
+        else
+        {
+            BuildAutoSetpoint(out desiredUp, out desiredForward, out collectiveThrust, dt);
         }
 
-        Vector3 rateError = desiredAngularVelocityBody - _angularVelocityBody;
-        Vector3 angularAccelerationCommand = Vector3.Scale(angularRateGain, rateError);
-        Vector3 inertiaOmega = MultiplyInertia(_angularVelocityBody);
+        Quaternion desiredRotation = Quaternion.LookRotation(desiredForward, desiredUp);
+        Vector3 desiredTorqueLocal = ComputeAttitudeTorqueLocal(desiredRotation, dt);
 
-        Vector3 torqueBody = new Vector3(
-            inertiaTensorBody.x * angularAccelerationCommand.x,
-            inertiaTensorBody.y * angularAccelerationCommand.y,
-            inertiaTensorBody.z * angularAccelerationCommand.z);
-
-        torqueBody += Vector3.Cross(_angularVelocityBody, inertiaOmega);
-
-        torqueBody.x = Mathf.Clamp(torqueBody.x, -maxPitchTorque, maxPitchTorque);
-        torqueBody.y = Mathf.Clamp(torqueBody.y, -maxYawTorque, maxYawTorque);
-        torqueBody.z = Mathf.Clamp(torqueBody.z, -maxRollTorque, maxRollTorque);
-        return torqueBody;
+        MixRotorThrusts(collectiveThrust, desiredTorqueLocal);
+        IntegrateCustomDynamics(dt);
     }
 
-    private Quaternion BuildManualDesiredRotation()
+    public void SetAutoTarget(Vector3 worldPosition)
     {
+        autoTargetPosition = worldPosition;
+    }
+
+    private void BuildManualSetpoint(out Vector3 desiredUp, out Vector3 desiredForward, out float collectiveThrust, float dt)
+    {
+        _manualYawHeading += _manualYawInput * manualYawRate * dt;
+        _manualYawHeading = WrapAngle360(_manualYawHeading);
+
         Vector2 tiltInput = new Vector2(_manualRollInput, _manualPitchInput);
         tiltInput = Vector2.ClampMagnitude(tiltInput, 1f);
 
         float maxTiltRadians = manualMaxTiltAngle * Mathf.Deg2Rad;
-        float tiltScale = Mathf.Tan(maxTiltRadians);
         Vector3 desiredUpInYawFrame = new Vector3(
-            tiltInput.x * tiltScale,
+            -tiltInput.x * Mathf.Tan(maxTiltRadians),
             1f,
-            tiltInput.y * tiltScale).normalized;
+            -tiltInput.y * Mathf.Tan(maxTiltRadians)
+        ).normalized;
 
         Quaternion yawRotation = Quaternion.Euler(0f, _manualYawHeading, 0f);
-        Vector3 desiredUp = yawRotation * desiredUpInYawFrame;
+        desiredUp = yawRotation * desiredUpInYawFrame;
+
         Vector3 yawForward = yawRotation * Vector3.forward;
-        Vector3 desiredForward = Vector3.ProjectOnPlane(yawForward, desiredUp);
+        desiredForward = Vector3.ProjectOnPlane(yawForward, desiredUp).normalized;
 
         if (desiredForward.sqrMagnitude < 0.0001f)
         {
-            desiredForward = Vector3.ProjectOnPlane(_rotationWorld * Vector3.forward, desiredUp);
+            desiredForward = Vector3.ProjectOnPlane(_rotationWorld * Vector3.forward, desiredUp).normalized;
         }
 
-        if (desiredForward.sqrMagnitude < 0.0001f)
-        {
-            desiredForward = Vector3.forward;
-        }
-
-        return Quaternion.LookRotation(desiredForward.normalized, desiredUp);
+        float desiredVerticalSpeed = _manualThrottleInput * manualMaxClimbRate;
+        collectiveThrust = ComputeCollectiveThrustFromVerticalSpeed(desiredVerticalSpeed, dt);
     }
 
-    private float ComputeManualCollectiveThrust(float dt)
+    private void BuildAutoSetpoint(out Vector3 desiredUp, out Vector3 desiredForward, out float collectiveThrust, float dt)
     {
-        float desiredVerticalSpeed = _manualThrottleInput * manualMaxClimbRate;
+        Vector3 target = autoTargetTransform != null ? autoTargetTransform.position : autoTargetPosition;
+
+        Vector3 positionError = target - _positionWorld;
+        Vector3 horizontalError = Vector3.ProjectOnPlane(positionError, Vector3.up);
+        Vector3 horizontalVelocity = Vector3.ProjectOnPlane(_linearVelocityWorld, Vector3.up);
+
+        _horizontalIntegral += horizontalError * dt;
+        _horizontalIntegral = Vector3.ClampMagnitude(_horizontalIntegral, horizontalIntegralLimit);
+
+        Vector3 horizontalAccelerationCommand =
+            horizontalError * horizontalPositionKp +
+            _horizontalIntegral * horizontalPositionKi -
+            horizontalVelocity * horizontalVelocityKd;
+
+        horizontalAccelerationCommand = Vector3.ClampMagnitude(horizontalAccelerationCommand, autoMaxHorizontalAcceleration);
+
+        Vector3 desiredForceDirection = horizontalAccelerationCommand + Vector3.up * gravityAcceleration;
+        desiredUp = desiredForceDirection.sqrMagnitude > 0.001f ? desiredForceDirection.normalized : Vector3.up;
+
+        float tilt = Vector3.Angle(Vector3.up, desiredUp);
+        if (tilt > autoMaxTiltAngle)
+        {
+            desiredUp = Vector3.Slerp(Vector3.up, desiredUp, autoMaxTiltAngle / tilt).normalized;
+        }
+
+        if (faceTargetInAutoMode)
+        {
+            Vector3 flatToTarget = Vector3.ProjectOnPlane(target - _positionWorld, Vector3.up);
+            if (flatToTarget.sqrMagnitude > 0.05f)
+            {
+                _autoYawHeading = Mathf.Atan2(flatToTarget.x, flatToTarget.z) * Mathf.Rad2Deg;
+            }
+        }
+
+        Quaternion headingRotation = Quaternion.Euler(0f, _autoYawHeading, 0f);
+        Vector3 headingForward = headingRotation * Vector3.forward;
+        desiredForward = Vector3.ProjectOnPlane(headingForward, desiredUp).normalized;
+
+        if (desiredForward.sqrMagnitude < 0.0001f)
+        {
+            desiredForward = Vector3.ProjectOnPlane(_rotationWorld * Vector3.forward, desiredUp).normalized;
+        }
+
+        float desiredVerticalSpeed = Mathf.Clamp(positionError.y * autoAltitudePositionGain, -autoMaxVerticalSpeed, autoMaxVerticalSpeed);
+        collectiveThrust = ComputeCollectiveThrustFromVerticalSpeed(desiredVerticalSpeed, dt);
+    }
+
+    private float ComputeCollectiveThrustFromVerticalSpeed(float desiredVerticalSpeed, float dt)
+    {
         float currentVerticalSpeed = Vector3.Dot(_linearVelocityWorld, Vector3.up);
         float verticalSpeedError = desiredVerticalSpeed - currentVerticalSpeed;
 
@@ -250,63 +289,101 @@ public class QuadcopterController : MonoBehaviour
             verticalSpeedKi * _verticalSpeedIntegral +
             verticalSpeedKd * derivative;
 
-        float upAlignment = Mathf.Max(0.25f, Vector3.Dot(_rotationWorld * Vector3.up, Vector3.up));
+        float upAlignment = Mathf.Max(0.2f, Vector3.Dot(_rotationWorld * Vector3.up, Vector3.up));
         float collectiveThrust = mass * (gravityAcceleration + verticalAccelerationCommand) / upAlignment;
 
         return Mathf.Clamp(collectiveThrust, minRotorThrust * 4f, maxRotorThrust * 4f);
     }
 
-    private void MixBouabdallahInputs(float collectiveThrust, Vector3 torqueBody)
+    private Vector3 ComputeAttitudeTorqueLocal(Quaternion desiredRotation, float dt)
     {
-        _mixVector[0] = collectiveThrust;
-        _mixVector[1] = torqueBody.x;
-        _mixVector[2] = torqueBody.y;
-        _mixVector[3] = torqueBody.z;
+        Vector3 attitudeErrorLocal = RotationErrorLocal(desiredRotation, _rotationWorld);
 
-        float evenThrust = collectiveThrust * 0.25f;
+        _attitudeIntegral += attitudeErrorLocal * dt;
+        _attitudeIntegral = ClampPerAxis(_attitudeIntegral, attitudeIntegralLimit);
+
+        Vector3 proportional = Vector3.Scale(attitudeKp, attitudeErrorLocal);
+        Vector3 integral = Vector3.Scale(attitudeKi, _attitudeIntegral);
+        Vector3 derivative = -Vector3.Scale(attitudeKd, _angularVelocityBody);
+
+        Vector3 torque = proportional + integral + derivative;
+        torque.x = Mathf.Clamp(torque.x, -maxPitchTorque, maxPitchTorque);
+        torque.y = Mathf.Clamp(torque.y, -maxYawTorque, maxYawTorque);
+        torque.z = Mathf.Clamp(torque.z, -maxRollTorque, maxRollTorque);
+
+        return torque;
+    }
+
+    private void MixRotorThrusts(float collectiveThrust, Vector3 torqueLocal)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            Vector3 localPoint = transform.InverseTransformPoint(rotors[i].transform.position) - centerOfMassLocal;
+
+            _mixMatrix[0, i] = 1f;
+            _mixMatrix[1, i] = localPoint.z;
+            _mixMatrix[2, i] = -localPoint.x;
+            _mixMatrix[3, i] = rotors[i].yawSpinDirection * yawDragTorqueCoefficient;
+        }
+
+        _mixVector[0] = collectiveThrust;
+        _mixVector[1] = torqueLocal.x;
+        _mixVector[2] = torqueLocal.z;
+        _mixVector[3] = torqueLocal.y;
+
+        bool solved = SolveLinearSystem4x4(_mixMatrix, _mixVector, _mixSolution);
+
+        if (!solved)
+        {
+            float even = collectiveThrust * 0.25f;
+            for (int i = 0; i < 4; i++)
+            {
+                _mixSolution[i] = even;
+            }
+        }
 
         for (int i = 0; i < 4; i++)
         {
-            float thrust = _mixingReady ? MultiplyMixingRow(i) : evenThrust;
-            _rotorThrusts[i] = Mathf.Clamp(thrust, minRotorThrust, maxRotorThrust);
+            _rotorThrusts[i] = Mathf.Clamp(_mixSolution[i], minRotorThrust, maxRotorThrust);
         }
     }
 
-    private void IntegrateBouabdallahDynamics(float dt)
+    private void IntegrateCustomDynamics(float dt)
     {
         Vector3 totalForceBody = Vector3.zero;
         Vector3 totalTorqueBody = Vector3.zero;
-        float residualRotorSpeed = 0f;
 
         for (int i = 0; i < 4; i++)
         {
             float thrust = _rotorThrusts[i];
             Vector3 forceBody = Vector3.up * thrust;
-            Vector3 rotorPointBody = _rotorPointsBody[i];
-
             totalForceBody += forceBody;
+
+            Vector3 rotorPointBody = transform.InverseTransformPoint(rotors[i].transform.position) - centerOfMassLocal;
             totalTorqueBody += Vector3.Cross(rotorPointBody, forceBody);
-            totalTorqueBody += Vector3.up * (_rotorYawFactors[i] * thrust);
-            residualRotorSpeed += _rotorSpinDirections[i] * Mathf.Sqrt(Mathf.Max(0f, thrust));
+            totalTorqueBody += Vector3.up * (rotors[i].yawSpinDirection * yawDragTorqueCoefficient * thrust);
         }
 
         Vector3 gravityWorld = Vector3.down * (mass * gravityAcceleration);
         Vector3 totalForceWorld = _rotationWorld * totalForceBody + gravityWorld;
-        Vector3 linearAccelerationWorld = totalForceWorld / mass;
 
+        Vector3 linearAccelerationWorld = totalForceWorld / mass;
         _linearVelocityWorld += linearAccelerationWorld * dt;
         _linearVelocityWorld *= 1f / (1f + linearDrag * dt);
         _linearVelocityWorld = Vector3.ClampMagnitude(_linearVelocityWorld, maxLinearSpeed);
         _positionWorld += _linearVelocityWorld * dt;
 
-        Vector3 inertiaOmega = MultiplyInertia(_angularVelocityBody);
-        Vector3 rigidBodyGyroscopic = Vector3.Cross(_angularVelocityBody, inertiaOmega);
-        Vector3 rotorGyroscopic = rotorGyroscopicCoefficient * residualRotorSpeed * Vector3.Cross(_angularVelocityBody, Vector3.up);
+        Vector3 inertiaOmega = new Vector3(
+            inertiaTensorBody.x * _angularVelocityBody.x,
+            inertiaTensorBody.y * _angularVelocityBody.y,
+            inertiaTensorBody.z * _angularVelocityBody.z);
+
+        Vector3 gyroscopic = Vector3.Cross(_angularVelocityBody, inertiaOmega);
 
         Vector3 omegaDot = new Vector3(
-            (totalTorqueBody.x - rigidBodyGyroscopic.x - rotorGyroscopic.x) / inertiaTensorBody.x,
-            (totalTorqueBody.y - rigidBodyGyroscopic.y - rotorGyroscopic.y) / inertiaTensorBody.y,
-            (totalTorqueBody.z - rigidBodyGyroscopic.z - rotorGyroscopic.z) / inertiaTensorBody.z);
+            (totalTorqueBody.x - gyroscopic.x) / inertiaTensorBody.x,
+            (totalTorqueBody.y - gyroscopic.y) / inertiaTensorBody.y,
+            (totalTorqueBody.z - gyroscopic.z) / inertiaTensorBody.z);
 
         _angularVelocityBody += omegaDot * dt;
         _angularVelocityBody *= 1f / (1f + angularDrag * dt);
@@ -323,15 +400,7 @@ public class QuadcopterController : MonoBehaviour
         transform.SetPositionAndRotation(_positionWorld, _rotationWorld);
     }
 
-    private Vector3 MultiplyInertia(Vector3 bodyAngularVelocity)
-    {
-        return new Vector3(
-            inertiaTensorBody.x * bodyAngularVelocity.x,
-            inertiaTensorBody.y * bodyAngularVelocity.y,
-            inertiaTensorBody.z * bodyAngularVelocity.z);
-    }
-
-    private static Vector3 RotationErrorBody(Quaternion desired, Quaternion current)
+    private static Vector3 RotationErrorLocal(Quaternion desired, Quaternion current)
     {
         Quaternion error = desired * Quaternion.Inverse(current);
         error.ToAngleAxis(out float angleDeg, out Vector3 axisWorld);
@@ -346,39 +415,42 @@ public class QuadcopterController : MonoBehaviour
             angleDeg -= 360f;
         }
 
-        return Quaternion.Inverse(current) * axisWorld.normalized * (angleDeg * Mathf.Deg2Rad);
+        float angleRad = angleDeg * Mathf.Deg2Rad;
+        Vector3 axisLocal = Quaternion.Inverse(current) * axisWorld.normalized;
+        return axisLocal * angleRad;
     }
 
-    private float MultiplyMixingRow(int row)
+    private static Vector3 ClampPerAxis(Vector3 value, Vector3 limits)
     {
-        return
-            _mixMatrixInverse[row, 0] * _mixVector[0] +
-            _mixMatrixInverse[row, 1] * _mixVector[1] +
-            _mixMatrixInverse[row, 2] * _mixVector[2] +
-            _mixMatrixInverse[row, 3] * _mixVector[3];
+        return new Vector3(
+            Mathf.Clamp(value.x, -limits.x, limits.x),
+            Mathf.Clamp(value.y, -limits.y, limits.y),
+            Mathf.Clamp(value.z, -limits.z, limits.z));
     }
 
-    private bool TryBuildMixingInverse()
+    private static bool SolveLinearSystem4x4(float[,] matrix, float[] values, float[] solution)
     {
         const int n = 4;
+        float[,] a = new float[n, n + 1];
 
         for (int r = 0; r < n; r++)
         {
             for (int c = 0; c < n; c++)
             {
-                _inverseScratch[r, c] = _mixMatrix[r, c];
-                _inverseScratch[r, c + n] = r == c ? 1f : 0f;
+                a[r, c] = matrix[r, c];
             }
+
+            a[r, n] = values[r];
         }
 
         for (int pivotCol = 0; pivotCol < n; pivotCol++)
         {
             int pivotRow = pivotCol;
-            float pivotAbs = Mathf.Abs(_inverseScratch[pivotRow, pivotCol]);
+            float pivotAbs = Mathf.Abs(a[pivotRow, pivotCol]);
 
             for (int r = pivotCol + 1; r < n; r++)
             {
-                float candidate = Mathf.Abs(_inverseScratch[r, pivotCol]);
+                float candidate = Mathf.Abs(a[r, pivotCol]);
                 if (candidate > pivotAbs)
                 {
                     pivotAbs = candidate;
@@ -393,13 +465,13 @@ public class QuadcopterController : MonoBehaviour
 
             if (pivotRow != pivotCol)
             {
-                SwapRows(_inverseScratch, pivotRow, pivotCol, n * 2);
+                SwapRows(a, pivotRow, pivotCol, n + 1);
             }
 
-            float pivot = _inverseScratch[pivotCol, pivotCol];
-            for (int c = 0; c < n * 2; c++)
+            float pivot = a[pivotCol, pivotCol];
+            for (int c = pivotCol; c <= n; c++)
             {
-                _inverseScratch[pivotCol, c] /= pivot;
+                a[pivotCol, c] /= pivot;
             }
 
             for (int r = 0; r < n; r++)
@@ -409,60 +481,25 @@ public class QuadcopterController : MonoBehaviour
                     continue;
                 }
 
-                float factor = _inverseScratch[r, pivotCol];
+                float factor = a[r, pivotCol];
                 if (Mathf.Abs(factor) < 0.000001f)
                 {
                     continue;
                 }
 
-                for (int c = 0; c < n * 2; c++)
+                for (int c = pivotCol; c <= n; c++)
                 {
-                    _inverseScratch[r, c] -= factor * _inverseScratch[pivotCol, c];
+                    a[r, c] -= factor * a[pivotCol, c];
                 }
             }
         }
 
         for (int r = 0; r < n; r++)
         {
-            for (int c = 0; c < n; c++)
-            {
-                _mixMatrixInverse[r, c] = _inverseScratch[r, c + n];
-            }
+            solution[r] = a[r, n];
         }
 
         return true;
-    }
-
-    private void RefreshRotorGeometry()
-    {
-        _rotorGeometryReady = false;
-        _mixingReady = false;
-
-        if (!AreRotorsConfigured())
-        {
-            return;
-        }
-
-        // U1 is total thrust. The other rows are the body torques produced by r x F
-        // and rotor drag in Unity axes: x = pitch, y = yaw, z = roll.
-        for (int i = 0; i < 4; i++)
-        {
-            Rotor rotor = rotors[i];
-            _rotorPointsBody[i] = transform.InverseTransformPoint(rotor.transform.position) - centerOfMassLocal;
-            _rotorSpinDirections[i] = rotor.yawSpinDirection;
-            _rotorMaxVisualSpinSpeeds[i] = rotor.maxVisualSpinSpeed;
-            _rotorVisuals[i] = rotor.visual != null ? rotor.visual : rotor.transform;
-            _rotorVisualSpinAxes[i] = rotor.visualSpinAxis.sqrMagnitude > 0.0001f ? rotor.visualSpinAxis.normalized : Vector3.up;
-            _rotorYawFactors[i] = _rotorSpinDirections[i] * yawDragTorqueCoefficient;
-
-            _mixMatrix[0, i] = 1f;
-            _mixMatrix[1, i] = -_rotorPointsBody[i].z;
-            _mixMatrix[2, i] = _rotorYawFactors[i];
-            _mixMatrix[3, i] = _rotorPointsBody[i].x;
-        }
-
-        _rotorGeometryReady = true;
-        _mixingReady = TryBuildMixingInverse();
     }
 
     private static void SwapRows(float[,] matrix, int rowA, int rowB, int columnCount)
@@ -477,16 +514,23 @@ public class QuadcopterController : MonoBehaviour
 
     private void AnimateRotors()
     {
-        if (!_rotorGeometryReady)
+        for (int i = 0; i < rotors.Length; i++)
         {
-            return;
-        }
+            Rotor rotor = rotors[i];
+            if (rotor == null)
+            {
+                continue;
+            }
 
-        for (int i = 0; i < 4; i++)
-        {
+            Transform visual = rotor.visual != null ? rotor.visual : rotor.transform;
+            if (visual == null)
+            {
+                continue;
+            }
+
             float normalizedThrust = Mathf.InverseLerp(minRotorThrust, maxRotorThrust, _rotorThrusts[i]);
-            float spinSpeed = normalizedThrust * _rotorMaxVisualSpinSpeeds[i] * _rotorSpinDirections[i];
-            _rotorVisuals[i].Rotate(_rotorVisualSpinAxes[i], spinSpeed * Time.deltaTime, Space.Self);
+            float spinSpeed = normalizedThrust * rotor.maxVisualSpinSpeed;
+            visual.Rotate(rotor.visualSpinAxis.normalized, spinSpeed * rotor.yawSpinDirection * Time.deltaTime, Space.Self);
         }
     }
 
@@ -575,20 +619,20 @@ public class QuadcopterController : MonoBehaviour
     {
         _positionWorld = transform.position;
         _rotationWorld = transform.rotation;
+
         _manualYawHeading = transform.eulerAngles.y;
+        _autoYawHeading = _manualYawHeading;
     }
 
     private void ResetControllers()
     {
+        _horizontalIntegral = Vector3.zero;
         _verticalSpeedIntegral = 0f;
         _lastVerticalSpeedError = 0f;
+        _attitudeIntegral = Vector3.zero;
+
         _linearVelocityWorld = Vector3.zero;
         _angularVelocityBody = Vector3.zero;
-
-        for (int i = 0; i < _rotorThrusts.Length; i++)
-        {
-            _rotorThrusts[i] = 0f;
-        }
     }
 
     private void DisableUnityRigidbodyIfPresent()
@@ -615,6 +659,58 @@ public class QuadcopterController : MonoBehaviour
         _manualYawInput = AxisFromPair(IsYawRightPressed(), IsYawLeftPressed());
         _manualPitchInput = AxisFromPair(IsPitchForwardPressed(), IsPitchBackwardPressed());
         _manualRollInput = AxisFromPair(IsRollRightPressed(), IsRollLeftPressed());
+    }
+
+    private void HandleModeToggle()
+    {
+        if (!IsToggleModePressedThisFrame())
+        {
+            return;
+        }
+
+        flightMode = flightMode == FlightMode.Manual ? FlightMode.AutoTarget : FlightMode.Manual;
+        _manualYawHeading = transform.eulerAngles.y;
+        _autoYawHeading = _manualYawHeading;
+
+        _horizontalIntegral = Vector3.zero;
+        _verticalSpeedIntegral = 0f;
+        _attitudeIntegral = Vector3.zero;
+    }
+
+    private void HandleAutoTargetInput()
+    {
+        if (flightMode != FlightMode.AutoTarget || !allowMouseClickTarget || !IsSetTargetPressedThisFrame())
+        {
+            return;
+        }
+
+        if (targetSelectionCamera == null)
+        {
+            targetSelectionCamera = Camera.main;
+        }
+
+        if (targetSelectionCamera == null)
+        {
+            return;
+        }
+
+        if (!TryGetPointerScreenPosition(out Vector2 pointer))
+        {
+            return;
+        }
+
+        Ray ray = targetSelectionCamera.ScreenPointToRay(pointer);
+        if (Physics.Raycast(ray, out RaycastHit hitInfo, 500f))
+        {
+            SetAutoTarget(hitInfo.point);
+            return;
+        }
+
+        Plane horizontalPlane = new Plane(Vector3.up, new Vector3(0f, autoTargetPosition.y, 0f));
+        if (horizontalPlane.Raycast(ray, out float enter))
+        {
+            SetAutoTarget(ray.GetPoint(enter));
+        }
     }
 
     private static float AxisFromPair(bool positive, bool negative)
@@ -757,6 +853,54 @@ public class QuadcopterController : MonoBehaviour
 #endif
     }
 
+    private bool IsToggleModePressedThisFrame()
+    {
+#if ENABLE_INPUT_SYSTEM
+        if (Keyboard.current != null)
+        {
+            return Keyboard.current.mKey.wasPressedThisFrame;
+        }
+#endif
+#if ENABLE_LEGACY_INPUT_MANAGER
+        return Input.GetKeyDown(KeyCode.M);
+#else
+        return false;
+#endif
+    }
+
+    private bool IsSetTargetPressedThisFrame()
+    {
+#if ENABLE_INPUT_SYSTEM
+        if (Mouse.current != null)
+        {
+            return Mouse.current.leftButton.wasPressedThisFrame;
+        }
+#endif
+#if ENABLE_LEGACY_INPUT_MANAGER
+        return Input.GetMouseButtonDown(0);
+#else
+        return false;
+#endif
+    }
+
+    private bool TryGetPointerScreenPosition(out Vector2 position)
+    {
+#if ENABLE_INPUT_SYSTEM
+        if (Mouse.current != null)
+        {
+            position = Mouse.current.position.ReadValue();
+            return true;
+        }
+#endif
+#if ENABLE_LEGACY_INPUT_MANAGER
+        position = Input.mousePosition;
+        return true;
+#else
+        position = default;
+        return false;
+#endif
+    }
+
     private void OnDrawGizmosSelected()
     {
         if (!drawDebugGizmos)
@@ -764,9 +908,9 @@ public class QuadcopterController : MonoBehaviour
             return;
         }
 
-        Gizmos.color = Color.yellow;
         if (rotors != null)
         {
+            Gizmos.color = Color.yellow;
             for (int i = 0; i < rotors.Length; i++)
             {
                 if (rotors[i] == null || rotors[i].transform == null)
@@ -778,7 +922,9 @@ public class QuadcopterController : MonoBehaviour
             }
         }
 
+        Vector3 target = autoTargetTransform != null ? autoTargetTransform.position : autoTargetPosition;
         Gizmos.color = Color.cyan;
-        Gizmos.DrawSphere(transform.TransformPoint(centerOfMassLocal), 0.06f);
+        Gizmos.DrawWireSphere(target, 0.25f);
+        Gizmos.DrawLine(transform.position, target);
     }
 }
