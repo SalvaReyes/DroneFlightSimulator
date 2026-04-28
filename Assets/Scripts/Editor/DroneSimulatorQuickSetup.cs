@@ -1,7 +1,10 @@
 #if UNITY_EDITOR
 using System.IO;
+using Unity.Cinemachine;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 public static class DroneSimulatorQuickSetup
 {
@@ -30,6 +33,10 @@ public static class DroneSimulatorQuickSetup
     };
 
     private const string GeneratedFolder = "Assets/Art/Generated/DroneTesting";
+    private const string CameraRigName = "Drone Cinemachine Rig";
+    private const string FollowTargetName = "Drone Camera Follow Target";
+    private const string LookTargetName = "Drone Camera Look Target";
+    private const string CinemachineCameraName = "Drone Chase Cinemachine Camera";
 
     private sealed class MaterialSet
     {
@@ -86,6 +93,30 @@ public static class DroneSimulatorQuickSetup
         {
             Selection.activeGameObject = waypoints[0].gameObject;
             EditorGUIUtility.PingObject(waypoints[0]);
+        }
+    }
+
+    [MenuItem("Drone Simulator/Camera/Configure Cinemachine Drone Camera")]
+    public static void ConfigureCinemachineDroneCamera()
+    {
+        if (EditorApplication.isPlayingOrWillChangePlaymode)
+        {
+            Debug.LogError("Could not configure Cinemachine camera while Unity is in play mode. Exit play mode and run this again.");
+            return;
+        }
+
+        Transform drone = FindDrone();
+        if (drone == null)
+        {
+            Debug.LogError("Could not configure Cinemachine camera: Drone object was not found.");
+            return;
+        }
+
+        if (ConfigureSceneCamera(drone))
+        {
+            EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
+            EditorSceneManager.SaveOpenScenes();
+            Debug.Log("Configured Cinemachine drone camera.");
         }
     }
 
@@ -590,17 +621,192 @@ public static class DroneSimulatorQuickSetup
             cameraObject.tag = "MainCamera";
         }
 
-        DroneFollowCamera follow = mainCamera.GetComponent<DroneFollowCamera>();
-        if (follow == null)
+        ConfigureSceneCamera(target);
+        EditorUtility.SetDirty(mainCamera);
+    }
+
+    private static bool ConfigureSceneCamera(Transform drone)
+    {
+        if (drone == null)
         {
-            follow = Undo.AddComponent<DroneFollowCamera>(mainCamera.gameObject);
+            return false;
         }
 
-        follow.SetTarget(target);
-        follow.Configure(5.5f, 2.4f);
-        mainCamera.transform.position = target.position + new Vector3(0f, 2.4f, -5.5f);
-        mainCamera.transform.LookAt(target);
+        Camera mainCamera = Camera.main;
+        if (mainCamera == null)
+        {
+            GameObject cameraObject = new GameObject("Main Camera");
+            Undo.RegisterCreatedObjectUndo(cameraObject, "Create Main Camera");
+            mainCamera = Undo.AddComponent<Camera>(cameraObject);
+            cameraObject.tag = "MainCamera";
+        }
+
+        RemoveLegacyFollowCamera(mainCamera.gameObject);
+
+        CinemachineBrain brain = mainCamera.GetComponent<CinemachineBrain>();
+        if (brain == null)
+        {
+            brain = Undo.AddComponent<CinemachineBrain>(mainCamera.gameObject);
+        }
+
+        brain.UpdateMethod = CinemachineBrain.UpdateMethods.LateUpdate;
+        brain.BlendUpdateMethod = CinemachineBrain.BrainUpdateMethods.LateUpdate;
+        brain.DefaultBlend = new CinemachineBlendDefinition(CinemachineBlendDefinition.Styles.EaseOut, 0.35f);
+
+        DroneCinemachineTargetRig targetRig = ConfigureTargetRig(drone);
+        CinemachineCamera cinemachineCamera = ConfigureCinemachineCamera(mainCamera, targetRig);
+
+        Vector3 startingPosition = drone.position + Quaternion.Euler(0f, drone.eulerAngles.y, 0f) * new Vector3(0f, 2.3f, -6.2f);
+        Quaternion startingRotation = Quaternion.LookRotation((drone.position + Vector3.up * 0.8f - startingPosition).normalized, Vector3.up);
+        mainCamera.transform.SetPositionAndRotation(startingPosition, startingRotation);
+        cinemachineCamera.ForceCameraPosition(startingPosition, startingRotation);
+
         EditorUtility.SetDirty(mainCamera);
+        EditorUtility.SetDirty(brain);
+        EditorUtility.SetDirty(targetRig);
+        EditorUtility.SetDirty(cinemachineCamera);
+        return true;
+    }
+
+    private static DroneCinemachineTargetRig ConfigureTargetRig(Transform drone)
+    {
+        GameObject rigObject = FindOrCreateRoot(CameraRigName);
+        DroneCinemachineTargetRig rig = GetOrCreateTargetRigComponent(rigObject);
+        Transform followTarget = FindOrCreateChild(rigObject.transform, FollowTargetName);
+        Transform lookTarget = FindOrCreateChild(rigObject.transform, LookTargetName);
+
+        rig.SetDrone(drone);
+        rig.SetTargets(followTarget, lookTarget);
+
+        Quaternion yawRotation = Quaternion.Euler(0f, drone.eulerAngles.y, 0f);
+        followTarget.SetPositionAndRotation(drone.position, yawRotation);
+        lookTarget.SetPositionAndRotation(drone.position + Vector3.up * 0.8f, yawRotation);
+        return rig;
+    }
+
+    private static DroneCinemachineTargetRig GetOrCreateTargetRigComponent(GameObject rigObject)
+    {
+        GameObjectUtility.RemoveMonoBehavioursWithMissingScript(rigObject);
+
+        DroneCinemachineTargetRig rig = rigObject.GetComponent<DroneCinemachineTargetRig>();
+        if (rig != null)
+        {
+            MonoScript script = MonoScript.FromMonoBehaviour(rig);
+            if (script != null && string.IsNullOrEmpty(AssetDatabase.GetAssetPath(script)))
+            {
+                Undo.DestroyObjectImmediate(rig);
+                rig = null;
+            }
+        }
+
+        if (rig == null)
+        {
+            rig = Undo.AddComponent<DroneCinemachineTargetRig>(rigObject);
+        }
+
+        return rig;
+    }
+
+    private static CinemachineCamera ConfigureCinemachineCamera(Camera mainCamera, DroneCinemachineTargetRig targetRig)
+    {
+        GameObject cameraObject = FindOrCreateRoot(CinemachineCameraName);
+        CinemachineCamera cinemachineCamera = cameraObject.GetComponent<CinemachineCamera>();
+        if (cinemachineCamera == null)
+        {
+            cinemachineCamera = Undo.AddComponent<CinemachineCamera>(cameraObject);
+        }
+
+        Transform followTarget = targetRig.transform.Find(FollowTargetName);
+        Transform lookTarget = targetRig.transform.Find(LookTargetName);
+        cinemachineCamera.Follow = followTarget;
+        cinemachineCamera.LookAt = lookTarget;
+        cinemachineCamera.Priority = 20;
+
+        LensSettings lens = LensSettings.FromCamera(mainCamera);
+        lens.FieldOfView = 62f;
+        lens.NearClipPlane = 0.2f;
+        lens.FarClipPlane = 500f;
+        cinemachineCamera.Lens = lens;
+
+        CinemachineThirdPersonFollow follow = cameraObject.GetComponent<CinemachineThirdPersonFollow>();
+        if (follow == null)
+        {
+            follow = Undo.AddComponent<CinemachineThirdPersonFollow>(cameraObject);
+        }
+
+        follow.Damping = new Vector3(0.18f, 0.28f, 0.32f);
+        follow.ShoulderOffset = new Vector3(0f, 1.25f, 0f);
+        follow.VerticalArmLength = 0.8f;
+        follow.CameraSide = 0.5f;
+        follow.CameraDistance = 6.2f;
+
+        CinemachineRotationComposer composer = cameraObject.GetComponent<CinemachineRotationComposer>();
+        if (composer == null)
+        {
+            composer = Undo.AddComponent<CinemachineRotationComposer>(cameraObject);
+        }
+
+        composer.TargetOffset = Vector3.zero;
+        composer.Damping = new Vector2(0.22f, 0.18f);
+        composer.Lookahead.Enabled = true;
+        composer.Lookahead.Time = 0.12f;
+        composer.Lookahead.Smoothing = 7f;
+        composer.Lookahead.IgnoreY = true;
+        composer.Composition.ScreenPosition = new Vector2(0f, -0.08f);
+        composer.Composition.DeadZone.Enabled = true;
+        composer.Composition.DeadZone.Size = new Vector2(0.12f, 0.08f);
+        composer.Composition.HardLimits.Enabled = true;
+        composer.Composition.HardLimits.Size = new Vector2(0.85f, 0.7f);
+        composer.CenterOnActivate = true;
+
+        return cinemachineCamera;
+    }
+
+    private static void RemoveLegacyFollowCamera(GameObject cameraObject)
+    {
+        GameObjectUtility.RemoveMonoBehavioursWithMissingScript(cameraObject);
+
+        MonoBehaviour[] behaviours = cameraObject.GetComponents<MonoBehaviour>();
+        foreach (MonoBehaviour behaviour in behaviours)
+        {
+            if (behaviour != null && behaviour.GetType().Name == "DroneFollowCamera")
+            {
+                Undo.DestroyObjectImmediate(behaviour);
+            }
+        }
+    }
+
+    private static Transform FindDrone()
+    {
+        GameObject drone = GameObject.Find("Drone");
+        return drone != null ? drone.transform : null;
+    }
+
+    private static GameObject FindOrCreateRoot(string objectName)
+    {
+        GameObject gameObject = GameObject.Find(objectName);
+        if (gameObject != null)
+        {
+            return gameObject;
+        }
+
+        gameObject = new GameObject(objectName);
+        Undo.RegisterCreatedObjectUndo(gameObject, $"Create {objectName}");
+        return gameObject;
+    }
+
+    private static Transform FindOrCreateChild(Transform parent, string childName)
+    {
+        Transform child = parent.Find(childName);
+        if (child != null)
+        {
+            return child;
+        }
+
+        GameObject childObject = new GameObject(childName);
+        Undo.RegisterCreatedObjectUndo(childObject, $"Create {childName}");
+        childObject.transform.SetParent(parent, false);
+        return childObject.transform;
     }
 
     private static GameObject CreatePrimitive(

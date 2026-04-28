@@ -18,7 +18,7 @@ This creates a manual-only test scene:
 - Gates to fly through
 - Obstacle pylons
 - Start/finish pads
-- Follow camera
+- Cinemachine follow camera
 
 ## Build only the scenario
 
