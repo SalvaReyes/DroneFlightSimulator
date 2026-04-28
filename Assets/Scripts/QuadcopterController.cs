@@ -4,6 +4,7 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 #endif
 
+[DefaultExecutionOrder(-100)]
 public class QuadcopterController : MonoBehaviour
 {
     [Serializable]
@@ -61,6 +62,9 @@ public class QuadcopterController : MonoBehaviour
     [Header("Debug")]
     [SerializeField] private bool drawDebugGizmos = true;
 
+    [Header("Rendering")]
+    [SerializeField] private bool interpolateRenderedTransform = true;
+
     private readonly float[] _rotorThrusts = new float[4];
     private readonly Vector3[] _rotorPointsBody = new Vector3[4];
     private readonly Transform[] _rotorVisuals = new Transform[4];
@@ -77,8 +81,11 @@ public class QuadcopterController : MonoBehaviour
 
     private Vector3 _positionWorld;
     private Quaternion _rotationWorld;
+    private Vector3 _previousPositionWorld;
+    private Quaternion _previousRotationWorld;
     private Vector3 _linearVelocityWorld;
     private Vector3 _angularVelocityBody;
+    private bool _hasPreviousPhysicsState;
 
     private float _manualThrottleInput;
     private float _manualYawInput;
@@ -162,11 +169,18 @@ public class QuadcopterController : MonoBehaviour
         }
 
         float dt = Time.fixedDeltaTime;
+        CachePreviousPhysicsState();
+
         Vector3 desiredTorqueBody = ComputeManualTorqueBody(dt);
         float collectiveThrust = ComputeManualCollectiveThrust(dt);
 
         MixBouabdallahInputs(collectiveThrust, desiredTorqueBody);
         IntegrateBouabdallahDynamics(dt);
+    }
+
+    private void LateUpdate()
+    {
+        ApplyRenderedTransform();
     }
 
     private Vector3 ComputeManualTorqueBody(float dt)
@@ -320,7 +334,10 @@ public class QuadcopterController : MonoBehaviour
             _rotationWorld = (_rotationWorld * deltaRotation).normalized;
         }
 
-        transform.SetPositionAndRotation(_positionWorld, _rotationWorld);
+        if (!interpolateRenderedTransform)
+        {
+            ApplySimulationTransform();
+        }
     }
 
     private Vector3 MultiplyInertia(Vector3 bodyAngularVelocity)
@@ -575,7 +592,36 @@ public class QuadcopterController : MonoBehaviour
     {
         _positionWorld = transform.position;
         _rotationWorld = transform.rotation;
+        _previousPositionWorld = _positionWorld;
+        _previousRotationWorld = _rotationWorld;
+        _hasPreviousPhysicsState = false;
         _manualYawHeading = transform.eulerAngles.y;
+    }
+
+    private void CachePreviousPhysicsState()
+    {
+        _previousPositionWorld = _positionWorld;
+        _previousRotationWorld = _rotationWorld;
+        _hasPreviousPhysicsState = true;
+    }
+
+    private void ApplyRenderedTransform()
+    {
+        if (!interpolateRenderedTransform || !_hasPreviousPhysicsState || Time.fixedDeltaTime <= 0f)
+        {
+            ApplySimulationTransform();
+            return;
+        }
+
+        float alpha = Mathf.Clamp01((Time.time - Time.fixedTime) / Time.fixedDeltaTime);
+        Vector3 renderPosition = Vector3.Lerp(_previousPositionWorld, _positionWorld, alpha);
+        Quaternion renderRotation = Quaternion.Slerp(_previousRotationWorld, _rotationWorld, alpha);
+        transform.SetPositionAndRotation(renderPosition, renderRotation);
+    }
+
+    private void ApplySimulationTransform()
+    {
+        transform.SetPositionAndRotation(_positionWorld, _rotationWorld);
     }
 
     private void ResetControllers()
